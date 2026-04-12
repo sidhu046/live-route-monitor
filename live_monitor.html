@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Speed Monitor — 0.83 km</title>
+
+<!-- Leaflet CSS (free CDN, no API key needed) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+<style>
+/* ── Reset & base ── */
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: system-ui, -apple-system, monospace;
+  background: #0d1117;
+  color: #e6edf3;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Top info bar ── */
+#info-bar {
+  background: #161b22;
+  padding: 6px 16px;
+  border-bottom: 1px solid #30363d;
+  font-size: 0.72rem;
+  color: #8b949e;
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+  flex-shrink: 0;
+}
+#info-bar span { white-space: nowrap; }
+#gps-status { color: #d29922; }
+#gps-status.active { color: #3fb950; }
+
+/* ── Map fills middle space ── */
+#map { flex: 1; min-height: 0; }
+
+/* ── Bottom dashboard panel ── */
+#dashboard {
+  background: #161b22;
+  border-top: 2px solid #30363d;
+  padding: 10px 16px;
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+/* ── Individual metric boxes ── */
+.metric {
+  text-align: center;
+  min-width: 80px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.metric .value {
+  font-size: 1.9rem;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.metric .label {
+  font-size: 0.65rem;
+  color: #8b949e;
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Colour-coded speed values ── */
+#speed-val { color: #58a6ff; }
+#limit-val { color: #3fb950; }
+#acc-val   { color: #d29922; }
+#turn-val  { font-size: 0.85rem; color: #bc8cff; }
+#dist-val  { color: #f0883e; font-size: 1.2rem; }
+
+/* ── Warning/status box ── */
+#status-box {
+  flex: 1;
+  min-width: 200px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-weight: 700;
+  font-size: 1rem;
+  padding: 10px 16px;
+  border: 2px solid #30363d;
+  background: #21262d;
+  color: #8b949e;
+  transition: background 0.25s, border-color 0.25s, color 0.25s;
+  line-height: 1.4;
+}
+
+/* Warning states */
+#status-box.stationary {
+  background: #0d1117;
+  border-color: #30363d;
+  color: #8b949e;
+}
+#status-box.safe {
+  background: #0d2318;
+  border-color: #3fb950;
+  color: #3fb950;
+}
+#status-box.warn {
+  background: #2e1f00;
+  border-color: #d29922;
+  color: #d29922;
+}
+#status-box.danger {
+  background: #2d1117;
+  border-color: #f85149;
+  color: #f85149;
+  animation: danger-flash 0.55s ease-in-out infinite alternate;
+}
+
+@keyframes danger-flash {
+  from { opacity: 1;   border-color: #f85149; }
+  to   { opacity: 0.5; border-color: #ff8080; }
+}
+
+/* ── Accuracy bar ── */
+#acc-bar-wrap {
+  width: 100%;
+  height: 3px;
+  background: #21262d;
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+#acc-bar {
+  height: 3px;
+  background: #3fb950;
+  border-radius: 2px;
+  transition: width 0.5s, background 0.5s;
+  width: 100%;
+}
+</style>
+</head>
+<body>
+
+<!-- Top status bar -->
+<div id="info-bar">
+  <span>&#128507; 0.83 km &nbsp;|&nbsp; OSRM</span>
+  <span id="gps-status">GPS: waiting for signal…</span>
+  <span id="accuracy-info">Accuracy: —</span>
+  <span id="segment-info">Nearest segment: —</span>
+</div>
+
+<!-- Leaflet map -->
+<div id="map"></div>
+
+<!-- Dashboard panel -->
+<div id="dashboard">
+
+  <!-- Actual speed -->
+  <div class="metric">
+    <div class="value" id="speed-val">—</div>
+    <div class="label">km/h actual</div>
+  </div>
+
+  <!-- Speed limit from route segment -->
+  <div class="metric">
+    <div class="value" id="limit-val">—</div>
+    <div class="label">km/h limit</div>
+  </div>
+
+  <!-- GPS accuracy -->
+  <div class="metric" style="min-width:100px;">
+    <div class="value" id="acc-val">—</div>
+    <div class="label">GPS accuracy (m)</div>
+    <div id="acc-bar-wrap"><div id="acc-bar"></div></div>
+  </div>
+
+  <!-- Turn type on current segment -->
+  <div class="metric">
+    <div class="value" id="turn-val">—</div>
+    <div class="label">segment type</div>
+  </div>
+
+  <!-- Distance to destination -->
+  <div class="metric">
+    <div class="value" id="dist-val">—</div>
+    <div class="label">dist to end (m)</div>
+  </div>
+
+  <!-- Stopping distance (from friction) -->
+  <div class="metric">
+    <div class="value" id="stop-val" style="color:#f0883e">—</div>
+    <div class="label">stop dist (m)</div>
+  </div>
+
+  <!-- Road type & condition panel (shown when friction data exists) -->
+  <div class="metric" id="road-panel" style="min-width:160px;text-align:left;display:none">
+    <div style="font-size:0.68rem;color:#8b949e;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px">Road info</div>
+    <div id="road-type-val" style="font-size:0.82rem;font-weight:600;color:#bc8cff">—</div>
+    <div id="road-cond-val" style="font-size:0.75rem;color:#8b949e;margin-top:2px">—</div>
+    <div id="friction-val"  style="font-size:0.75rem;color:#f0883e;margin-top:2px">μ = —</div>
+  </div>
+
+  <!-- Warning / status box -->
+  <div id="status-box" class="stationary">
+    Waiting for GPS signal…
+  </div>
+
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+// ════════════════════════════════════════════════════════════════
+// ROUTE DATA  — embedded by Python at generation time
+// Each element: { lat, lon, limit (km/h), risk, turn, angle }
+// ════════════════════════════════════════════════════════════════
+const ROUTE = [{"lat": 16.79279, "lon": 80.82624, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79281, "lon": 80.82615, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79283, "lon": 80.82606, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79285, "lon": 80.82597, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79287, "lon": 80.82588, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79289, "lon": 80.82579, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79291, "lon": 80.8257, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79293, "lon": 80.82561, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79295, "lon": 80.82552, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79297, "lon": 80.82543, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79299, "lon": 80.82534, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 179.102, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7930108, "lon": 80.8252525, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7930317, "lon": 80.825165, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7930525, "lon": 80.8250775, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7930733, "lon": 80.82499, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7930942, "lon": 80.8249025, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.793115, "lon": 80.824815, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7931358, "lon": 80.8247275, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7931567, "lon": 80.82464, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7931775, "lon": 80.8245525, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7931983, "lon": 80.824465, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7932192, "lon": 80.8243775, "limit": 51.89, "limit_orig": 51.89, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 13.24, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79324, "lon": 80.82429, "limit": 13.5, "limit_orig": 13.5, "risk": "high", "turn": "very_sharp_curve", "angle": 116.431, "mu": 0.8, "f_risk": "low", "stop_m": 0.9, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.793195, "lon": 80.82425, "limit": 29.93, "limit_orig": 29.93, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 4.4, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79315, "lon": 80.82421, "limit": 22.5, "limit_orig": 22.5, "risk": "high", "turn": "sharp_curve", "angle": 142.197, "mu": 0.8, "f_risk": "low", "stop_m": 2.49, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79314, "lon": 80.82416, "limit": 36.0, "limit_orig": 36.0, "risk": "high", "turn": "mild_curve", "angle": 150.564, "mu": 0.8, "f_risk": "low", "stop_m": 6.37, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7931633, "lon": 80.8240833, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7931867, "lon": 80.8240067, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79321, "lon": 80.82393, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7932333, "lon": 80.8238533, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7932567, "lon": 80.8237767, "limit": 47.76, "limit_orig": 47.76, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 11.21, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79328, "lon": 80.8237, "limit": 13.5, "limit_orig": 13.5, "risk": "high", "turn": "very_sharp_curve", "angle": 97.944, "mu": 0.8, "f_risk": "low", "stop_m": 0.9, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.793204, "lon": 80.823662, "limit": 36.92, "limit_orig": 36.92, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 6.7, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.793128, "lon": 80.823624, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.793052, "lon": 80.823586, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.792976, "lon": 80.823548, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7929, "lon": 80.82351, "limit": 36.0, "limit_orig": 36.0, "risk": "high", "turn": "mild_curve", "angle": 165.391, "mu": 0.8, "f_risk": "low", "stop_m": 6.37, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7928433, "lon": 80.82346, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7927867, "lon": 80.82341, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79273, "lon": 80.82336, "limit": 36.0, "limit_orig": 36.0, "risk": "high", "turn": "mild_curve", "angle": 161.021, "mu": 0.8, "f_risk": "low", "stop_m": 6.37, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79269, "lon": 80.82329, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79265, "lon": 80.82322, "limit": 36.0, "limit_orig": 36.0, "risk": "high", "turn": "mild_curve", "angle": 169.135, "mu": 0.8, "f_risk": "low", "stop_m": 6.37, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7926233, "lon": 80.8231433, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7925967, "lon": 80.8230667, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79257, "lon": 80.82299, "limit": 36.0, "limit_orig": 36.0, "risk": "high", "turn": "mild_curve", "angle": 156.298, "mu": 0.8, "f_risk": "low", "stop_m": 6.37, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.792575, "lon": 80.82291, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79258, "lon": 80.82283, "limit": 22.5, "limit_orig": 22.5, "risk": "high", "turn": "sharp_curve", "angle": 121.465, "mu": 0.8, "f_risk": "low", "stop_m": 2.49, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79251, "lon": 80.8227784, "limit": 46.31, "limit_orig": 46.31, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 10.54, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79244, "lon": 80.8227268, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79237, "lon": 80.8226753, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7923, "lon": 80.8226237, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79223, "lon": 80.8225721, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79216, "lon": 80.8225205, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79209, "lon": 80.8224689, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79202, "lon": 80.8224174, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79195, "lon": 80.8223658, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79188, "lon": 80.8223142, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79181, "lon": 80.8222626, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79174, "lon": 80.8222111, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79167, "lon": 80.8221595, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7916, "lon": 80.8221079, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79153, "lon": 80.8220563, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79146, "lon": 80.8220047, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79139, "lon": 80.8219532, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79132, "lon": 80.8219016, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79125, "lon": 80.82185, "limit": 22.5, "limit_orig": 22.5, "risk": "high", "turn": "sharp_curve", "angle": 142.516, "mu": 0.8, "f_risk": "low", "stop_m": 2.49, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79117, "lon": 80.8218533, "limit": 44.76, "limit_orig": 44.76, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 9.85, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79109, "lon": 80.8218567, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79101, "lon": 80.82186, "limit": 36.0, "limit_orig": 36.0, "risk": "medium", "turn": "mild_curve", "angle": 153.74, "mu": 0.8, "f_risk": "low", "stop_m": 6.37, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7909367, "lon": 80.8219017, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7908633, "lon": 80.8219433, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79079, "lon": 80.821985, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7907167, "lon": 80.8220267, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7906433, "lon": 80.8220683, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79057, "lon": 80.82211, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7904967, "lon": 80.8221517, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7904233, "lon": 80.8221933, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79035, "lon": 80.822235, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7902767, "lon": 80.8222767, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7902033, "lon": 80.8223183, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.79013, "lon": 80.82236, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 177.455, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7900543, "lon": 80.8223986, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7899786, "lon": 80.8224371, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7899029, "lon": 80.8224757, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7898271, "lon": 80.8225143, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7897514, "lon": 80.8225529, "limit": 54.0, "limit_orig": 54.0, "risk": "low", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7896757, "lon": 80.8225914, "limit": 54.0, "limit_orig": 54.0, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 14.33, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7896, "lon": 80.82263, "limit": 22.5, "limit_orig": 22.5, "risk": "high", "turn": "sharp_curve", "angle": 147.697, "mu": 0.8, "f_risk": "low", "stop_m": 2.49, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7895133, "lon": 80.82262, "limit": 46.74, "limit_orig": 46.74, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 10.74, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.7894267, "lon": 80.82261, "limit": 47.78, "limit_orig": 47.78, "risk": "high", "turn": "straight", "angle": 180.0, "mu": 0.8, "f_risk": "low", "stop_m": 11.22, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.78934, "lon": 80.8226, "limit": 9.0, "limit_orig": 9.0, "risk": "high", "turn": "u_turn", "angle": 83.696, "mu": 0.8, "f_risk": "low", "stop_m": 0.4, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}, {"lat": 16.78934, "lon": 80.82262, "limit": 9.0, "limit_orig": 9.0, "risk": "high", "turn": "u_turn", "angle": 83.696, "mu": 0.8, "f_risk": "low", "stop_m": 0.4, "road_type": "Tar Road (Bituminous)", "road_cond": "Dry"}];
+
+// Intermediate waypoints [[lat, lon], ...]
+const WAYPOINTS = [];
+
+// Origin and destination
+const ORIGIN      = [16.794331747678317, 80.82665473222734];
+const DESTINATION = [16.789401492941533, 80.8226126432419];
+
+// ════════════════════════════════════════════════════════════════
+// MAP SETUP
+// ════════════════════════════════════════════════════════════════
+const map = L.map('map', { zoomControl: true });
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  maxZoom: 19
+}).addTo(map);
+
+// ── Draw route coloured by risk ──────────────────────────────────
+const riskColor = {
+  low    : '#3fb950',
+  medium : '#d29922',
+  high   : '#f85149'
+};
+
+for (let i = 0; i < ROUTE.length - 1; i++) {
+  L.polyline(
+    [[ROUTE[i].lat, ROUTE[i].lon], [ROUTE[i+1].lat, ROUTE[i+1].lon]],
+    {
+      color   : riskColor[ROUTE[i].risk] || '#58a6ff',
+      weight  : 5,
+      opacity : 0.85
+    }
+  ).bindPopup(
+    '<b>Segment #' + i + '</b><br>' +
+    'Limit: ' + ROUTE[i].limit + ' km/h<br>' +
+    'Risk: ' + ROUTE[i].risk + '<br>' +
+    'Type: ' + ROUTE[i].turn.replace(/_/g,' ')
+  ).addTo(map);
+}
+
+// ── Start marker ─────────────────────────────────────────────────
+const startIcon = L.divIcon({
+  html: '<div style="width:20px;height:20px;border-radius:50%;' +
+        'background:#3fb950;border:3px solid #fff;' +
+        'box-shadow:0 0 8px #3fb95088"></div>',
+  iconSize:[20,20], iconAnchor:[10,10], className:''
+});
+L.marker(ORIGIN, {icon: startIcon})
+  .bindPopup('<b>START</b><br>' + ORIGIN[0].toFixed(6) + ', ' + ORIGIN[1].toFixed(6))
+  .addTo(map);
+
+// ── Intermediate waypoint markers ────────────────────────────────
+const wptIcon = L.divIcon({
+  html: '<div style="width:14px;height:14px;background:#58a6ff;' +
+        'border:2px solid #fff;transform:rotate(45deg);' +
+        'box-shadow:0 0 6px #58a6ff88"></div>',
+  iconSize:[14,14], iconAnchor:[7,7], className:''
+});
+WAYPOINTS.forEach(function(w, idx) {
+  L.marker(w, {icon: wptIcon})
+    .bindPopup('<b>Waypoint ' + (idx+1) + '</b><br>' +
+               w[0].toFixed(6) + ', ' + w[1].toFixed(6))
+    .addTo(map);
+});
+
+// ── End marker ───────────────────────────────────────────────────
+const endIcon = L.divIcon({
+  html: '<div style="width:20px;height:20px;border-radius:3px;' +
+        'background:#f85149;border:3px solid #fff;' +
+        'box-shadow:0 0 8px #f8514988"></div>',
+  iconSize:[20,20], iconAnchor:[10,10], className:''
+});
+L.marker(DESTINATION, {icon: endIcon})
+  .bindPopup('<b>END</b><br>' + DESTINATION[0].toFixed(6) + ', ' + DESTINATION[1].toFixed(6))
+  .addTo(map);
+
+// Fit map to full route bounds
+const allLatLngs = ROUTE.map(p => [p.lat, p.lon]);
+map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
+
+// ── Live position marker (animated blue dot) ──────────────────────
+const posIcon = L.divIcon({
+  html: '<div style="width:20px;height:20px;border-radius:50%;' +
+        'background:#58a6ff;border:3px solid #fff;' +
+        'box-shadow:0 0 12px #58a6ffaa;' +
+        'animation:pulse 1.5s ease-in-out infinite alternate"></div>' +
+        '<style>@keyframes pulse{' +
+        'from{box-shadow:0 0 6px #58a6ff88}' +
+        'to{box-shadow:0 0 18px #58a6ffcc}}</style>',
+  iconSize:[20,20], iconAnchor:[10,10], className:''
+});
+const posMarker = L.marker(ORIGIN, {
+  icon: posIcon,
+  zIndexOffset: 1000
+}).addTo(map);
+
+// Accuracy circle around live position
+const accCircle = L.circle(ORIGIN, {
+  radius: 20,
+  color: '#58a6ff',
+  fillColor: '#58a6ff',
+  fillOpacity: 0.08,
+  weight: 1
+}).addTo(map);
+
+// ── Map legend ────────────────────────────────────────────────────
+const legend = L.control({position: 'bottomright'});
+legend.onAdd = function() {
+  const d = L.DomUtil.create('div');
+  d.style.cssText = 'background:#161b22;padding:10px 12px;border:1px solid #30363d;' +
+                    'border-radius:8px;color:#e6edf3;font-size:11px;font-family:monospace;';
+  d.innerHTML = '<b style="color:#58a6ff">Risk colours</b><br>' +
+    '<span style="color:#3fb950">━━</span> Low risk<br>' +
+    '<span style="color:#d29922">━━</span> Medium risk<br>' +
+    '<span style="color:#f85149">━━</span> High risk<br>' +
+    '<span style="color:#58a6ff">◆</span> Waypoint<br>' +
+    '<span style="color:#58a6ff">●</span> You are here';
+  return d;
+};
+legend.addTo(map);
+
+
+// ════════════════════════════════════════════════════════════════
+// HAVERSINE DISTANCE  (matches Python step1_fetch_route.py)
+// Returns metres between two (lat, lon) points.
+// ════════════════════════════════════════════════════════════════
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2)
+          + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2))
+          * Math.sin(dLon/2) * Math.sin(dLon/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// NEAREST SEGMENT LOOKUP
+// Returns the index of the closest ROUTE point to (lat, lon).
+// Used to get the speed limit and turn type for current position.
+// ════════════════════════════════════════════════════════════════
+function nearestSegment(lat, lon) {
+  let bestIdx  = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < ROUTE.length; i++) {
+    const d = haversine(lat, lon, ROUTE[i].lat, ROUTE[i].lon);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx  = i;
+    }
+  }
+  return bestIdx;
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// SPEED CALCULATION STATE
+// ════════════════════════════════════════════════════════════════
+let prevPos = null;          // { lat, lon, ts } of last GPS fix
+let currentSpeedKmh = 0;     // smoothed speed in km/h
+
+// Rolling median buffer (3 samples) — removes GPS spike outliers
+const SPEED_BUF    = [];
+const SPEED_BUF_N  = 3;
+
+function medianSpeed(raw) {
+  // Sanity gate: ignore physically impossible jumps (GPS glitch)
+  if (raw > 200 || raw < 0) return currentSpeedKmh;
+
+  SPEED_BUF.push(raw);
+  if (SPEED_BUF.length > SPEED_BUF_N) SPEED_BUF.shift();
+
+  const sorted = [...SPEED_BUF].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// GEOLOCATION CALLBACK — fires on every GPS fix
+// This is the core of the real-time speed monitoring system.
+// ════════════════════════════════════════════════════════════════
+function onPosition(pos) {
+  const lat = pos.coords.latitude;
+  const lon = pos.coords.longitude;
+  const acc = pos.coords.accuracy;   // GPS accuracy in metres
+  const ts  = pos.timestamp;         // milliseconds since epoch
+
+  // ── Update GPS status bar ───────────────────────────────────
+  const statusEl = document.getElementById('gps-status');
+  statusEl.textContent = 'GPS: active';
+  statusEl.className   = 'active';
+
+  document.getElementById('accuracy-info').textContent =
+    'Accuracy: ~' + Math.round(acc) + ' m';
+
+  // ── Move live position marker ────────────────────────────────
+  posMarker.setLatLng([lat, lon]);
+  accCircle.setLatLng([lat, lon]);
+  accCircle.setRadius(Math.min(acc, 200));  // cap visual radius
+
+  // ── Pan map to follow position ───────────────────────────────
+  map.panTo([lat, lon], { animate: true, duration: 0.6 });
+
+  // ── Speed calculation (haversine + time delta) ───────────────
+  if (prevPos !== null) {
+    const distM  = haversine(prevPos.lat, prevPos.lon, lat, lon);
+    const dtSec  = (ts - prevPos.ts) / 1000;
+
+    if (dtSec > 0.05) {  // ignore duplicate timestamps
+      const rawKmh    = (distM / dtSec) * 3.6;
+      currentSpeedKmh = medianSpeed(rawKmh);
+    }
+  }
+  prevPos = { lat, lon, ts };
+
+  // ── Find nearest route segment → get limit & turn type ───────
+  const segIdx = nearestSegment(lat, lon);
+  const seg    = ROUTE[segIdx];
+  const limit  = seg.limit;
+
+  // ── Distance to end of route ─────────────────────────────────
+  const distToEnd = haversine(lat, lon, DESTINATION[0], DESTINATION[1]);
+
+  // ── Update accuracy bar (green < 20m, yellow < 50m, red > 50m) ──
+  const accBar = document.getElementById('acc-bar');
+  const accPct = Math.max(0, Math.min(100, (1 - acc / 200) * 100));
+  accBar.style.width = accPct + '%';
+  accBar.style.background = acc < 20 ? '#3fb950' : acc < 50 ? '#d29922' : '#f85149';
+
+  // ── Update all dashboard values ───────────────────────────────
+  document.getElementById('speed-val').textContent =
+    currentSpeedKmh.toFixed(1);
+  document.getElementById('limit-val').textContent =
+    limit;
+  document.getElementById('acc-val').textContent =
+    Math.round(acc);
+  document.getElementById('turn-val').textContent =
+    (seg.turn || '').replace(/_/g, ' ');
+  document.getElementById('dist-val').textContent =
+    Math.round(distToEnd);
+  document.getElementById('segment-info').textContent =
+    'Segment #' + segIdx + '  |  ' + seg.turn.replace(/_/g,' ') +
+    '  |  angle ' + seg.angle.toFixed(0) + '°';
+
+  // ── Road type / condition / friction info (step7 data) ────────────────
+  if (seg.mu !== undefined) {
+    const roadPanel = document.getElementById('road-panel');
+    roadPanel.style.display = '';
+    document.getElementById('road-type-val').textContent = seg.road_type || '—';
+    document.getElementById('road-cond-val').textContent = seg.road_cond || '—';
+    document.getElementById('friction-val').textContent  =
+      'μ = ' + seg.mu.toFixed(2) + '  |  ' + seg.f_risk.toUpperCase() + ' friction';
+    document.getElementById('stop-val').textContent =
+      seg.stop_m ? seg.stop_m.toFixed(1) : '—';
+  }
+
+  // ── Warning system ─────────────────────────────────────────
+  updateWarning(currentSpeedKmh, limit, seg);
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// WARNING SYSTEM
+// Compares actual speed to the nearest segment's speed limit.
+// The limit is turn-aware: curves get lower limits automatically
+// because step3_speed_risk.py assigned them lower recommended_speed_kmh.
+// When step7 friction data is present, adjusted_speed_kmh is used as
+// the limit (already friction-corrected by Python) and friction risk
+// is also shown in the warning panel.
+// ════════════════════════════════════════════════════════════════
+function updateWarning(speed, limit, seg) {
+  const box  = document.getElementById('status-box');
+  const over = speed - limit;
+
+  // Case 1: Not moving (or very low speed)
+  if (speed < 0.5) {
+    box.className   = 'stationary';
+    box.innerHTML   = '&#9899; Stationary';
+    return;
+  }
+
+  // Build friction suffix for display (only when step7 data present)
+  let frictionNote = '';
+  if (seg.mu !== undefined && seg.f_risk !== 'low') {
+    const fClr = seg.f_risk === 'high' ? '#f85149' : '#d29922';
+    frictionNote = '<br><small style="font-weight:400;font-size:0.7rem;color:' + fClr + '">' +
+      '&#9888; ' + seg.f_risk.toUpperCase() + ' friction — μ=' + seg.mu.toFixed(2) +
+      ' — stop in ' + (seg.stop_m||0).toFixed(0) + 'm</small>';
+  }
+
+  // Case 2: Under the limit — safe (but warn if friction is bad)
+  if (over <= 0) {
+    const turnLabel = seg.turn.replace(/_/g, ' ');
+    if (seg.mu !== undefined && seg.f_risk === 'high') {
+      box.className   = 'warn';
+      box.innerHTML   = '&#9888; Caution: low grip<br>' +
+        '<small style="font-weight:400;font-size:0.75rem">' +
+        speed.toFixed(1) + ' km/h &nbsp;|&nbsp; ' + turnLabel + '</small>' + frictionNote;
+    } else {
+      box.className   = 'safe';
+      box.innerHTML   = '&#10003; Safe<br><small style="font-weight:400;font-size:0.75rem">' +
+                        speed.toFixed(1) + ' km/h &nbsp;|&nbsp; ' + turnLabel + '</small>' + frictionNote;
+    }
+    return;
+  }
+
+  // Case 3: Slightly over (1–9 km/h) — yellow warning
+  if (over < 10) {
+    box.className   = 'warn';
+    box.innerHTML   = '&#9888; Slow down!<br><small style="font-weight:400;font-size:0.75rem">'
+                    + '+' + over.toFixed(1) + ' km/h over limit (' + limit + ')</small>' + frictionNote;
+    return;
+  }
+
+  // Case 4: Significantly over (10+ km/h) — red flashing danger
+  box.className   = 'danger';
+  box.innerHTML   = '&#128680; DANGER &#128680;<br><small style="font-weight:400;font-size:0.75rem">'
+                  + '+' + over.toFixed(1) + ' km/h OVER LIMIT (' + limit + ' km/h)</small>' + frictionNote;
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// ERROR HANDLER
+// ════════════════════════════════════════════════════════════════
+function onError(err) {
+  const statusEl = document.getElementById('gps-status');
+  statusEl.className = '';
+
+  const messages = {
+    1: 'GPS denied — allow location in browser settings',
+    2: 'GPS unavailable — check device settings',
+    3: 'GPS timeout — retrying…'
+  };
+
+  statusEl.textContent = 'GPS: ' + (messages[err.code] || err.message);
+  document.getElementById('status-box').className = 'stationary';
+  document.getElementById('status-box').textContent =
+    'No GPS signal\nCheck browser permissions';
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// START GPS WATCHING
+// enableHighAccuracy: true  → uses GPS chip (not cell tower)
+// maximumAge: 0             → always fresh fix, never cached
+// timeout: 10000            → 10s before error fires
+// ════════════════════════════════════════════════════════════════
+if ('geolocation' in navigator) {
+  navigator.geolocation.watchPosition(onPosition, onError, {
+    enableHighAccuracy : true,
+    maximumAge         : 0,
+    timeout            : 10000
+  });
+} else {
+  document.getElementById('gps-status').textContent =
+    'Geolocation not supported in this browser';
+  document.getElementById('status-box').textContent =
+    'Browser does not support GPS';
+}
+</script>
+</body>
+</html>
